@@ -22,7 +22,7 @@ from tqdm import tqdm
 load_dotenv()
 
 # Constants
-COURSE_FOLDER = "/Users/Alwin/Downloads/ENG3004_222"
+COURSE_FOLDER = "./ENG3004_222"
 VECTOR_DB_PATH = "vector_db"
 
 @dataclass
@@ -157,7 +157,6 @@ class RAGTutor:
         self.vector_store = VectorStore(VECTOR_DB_PATH)
         self.processor = DocumentProcessor()
         
-        # Configure Gemini API
         api_key = st.secrets["GOOGLE_API_KEY"]
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment variables")
@@ -358,31 +357,49 @@ class RAGTutor:
         return relevant_content
     
     def generate_response(self, 
-                         student_query: str,
-                         student_work: str = None,
-                         assignment_context: str = None) -> str:
+                        student_query: str,
+                        student_work: str = None,
+                        assignment_context: str = None) -> str:
         """Generate tutoring response with error handling"""
         try:
-            context = self.retrieve_relevant_context(student_query)
+            # Adjust context retrieval based on whether we're providing feedback
+            if student_work and student_query == "Please provide feedback on this work and suggest improvements.":
+                # For feedback-only requests, prioritize similar examples and rubric
+                context = self.retrieve_relevant_context(student_work, top_k=4, include_examples=True)
+            else:
+                context = self.retrieve_relevant_context(student_query)
             
             prompt = f"""You are an AI tutor for the course 'Society and the Engineer'.
             
-Context from course materials:
-{' '.join(context)}"""
+    Context from course materials:
+    {' '.join(context)}"""
 
             if assignment_context and assignment_context != "None":
                 prompt += f"\n\nCurrent assignment: {assignment_context}"
 
-            prompt += f"\n\nStudent query: {student_query}"
-
             if student_work:
                 prompt += f"\n\nStudent work submitted: {student_work}"
-
-            prompt += "\n\nProvide a helpful tutoring response that:"
-            prompt += "\n- Addresses the student's specific question"
-            prompt += "\n- References relevant course materials"
-            prompt += "\n- Provides constructive feedback if student work was submitted"
-            prompt += "\n- Encourages critical thinking"
+                
+                if student_query == "Please provide feedback on this work and suggest improvements.":
+                    prompt += "\n\nProvide detailed feedback on the submitted work that:"
+                    prompt += "\n- Analyzes the work's strengths and areas for improvement"
+                    prompt += "\n- References specific parts of the submission"
+                    prompt += "\n- Suggests concrete improvements"
+                    prompt += "\n- Relates feedback to course materials and examples"
+                    prompt += "\n- Maintains a constructive and encouraging tone"
+                else:
+                    prompt += f"\n\nStudent question about their work: {student_query}"
+                    prompt += "\n\nProvide a response that:"
+                    prompt += "\n- Addresses the specific question"
+                    prompt += "\n- References relevant course materials"
+                    prompt += "\n- Provides constructive feedback"
+                    prompt += "\n- Encourages critical thinking"
+            else:
+                prompt += f"\n\nStudent query: {student_query}"
+                prompt += "\n\nProvide a helpful tutoring response that:"
+                prompt += "\n- Addresses the student's specific question"
+                prompt += "\n- References relevant course materials"
+                prompt += "\n- Encourages critical thinking"
             
             response = self.llm.generate_content(prompt)
             return response.text
@@ -391,7 +408,7 @@ Context from course materials:
             error_msg = f"Error generating response: {str(e)}"
             print(error_msg)
             return "I apologize, but I encountered an error generating the response. Please try again or rephrase your question."
-
+        
 def create_tutor_ui():
     st.set_page_config(layout="wide", page_title="ENG3004 AI Tutor")
     st.title("Society and the Engineer - AI Tutor")
@@ -416,20 +433,90 @@ def create_tutor_ui():
     )
     
     # Input areas
-    student_query = st.text_area("What's your question?")
-    student_work = st.text_area("(Optional) Paste your work here for feedback", height=200)
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        student_query = st.text_area("What's your question? (Optional if submitting work for feedback)", 
+                                   height=150)
+    
+    with col2:
+        student_work = st.text_area("Paste your work here for feedback (Optional)", 
+                                   height=150)
     
     if st.button("Get Help"):
-        if student_query:
-            with st.spinner("Generating response..."):
+        if not student_query and not student_work:
+            st.warning("Please either ask a question or submit work for feedback.")
+            return
+            
+        with st.spinner("Generating response..."):
+            if not student_query and student_work:
+                # If only work is submitted, generate a general feedback question
+                default_query = "Please provide feedback on this work and suggest improvements."
                 response = st.session_state.tutor.generate_response(
-                    student_query, 
+                    default_query,
+                    student_work,
+                    assignment_context
+                )
+            else:
+                response = st.session_state.tutor.generate_response(
+                    student_query,
                     student_work if student_work else None,
                     assignment_context
                 )
-                st.write(response)
-        else:
-            st.warning("Please enter a question")
+            st.write(response)
 
+def generate_response(self, 
+                     student_query: str,
+                     student_work: str = None,
+                     assignment_context: str = None) -> str:
+    """Generate tutoring response with error handling"""
+    try:
+        # Adjust context retrieval based on whether we're providing feedback
+        if student_work and student_query == "Please provide feedback on this work and suggest improvements.":
+            # For feedback-only requests, prioritize similar examples and rubric
+            context = self.retrieve_relevant_context(student_work, top_k=4, include_examples=True)
+        else:
+            context = self.retrieve_relevant_context(student_query)
+        
+        prompt = f"""You are an AI tutor for the course 'Society and the Engineer'.
+        
+Context from course materials:
+{' '.join(context)}"""
+
+        if assignment_context and assignment_context != "None":
+            prompt += f"\n\nCurrent assignment: {assignment_context}"
+
+        if student_work:
+            prompt += f"\n\nStudent work submitted: {student_work}"
+            
+            if student_query == "Please provide feedback on this work and suggest improvements.":
+                prompt += "\n\nProvide detailed feedback on the submitted work that:"
+                prompt += "\n- Analyzes the work's strengths and areas for improvement"
+                prompt += "\n- References specific parts of the submission"
+                prompt += "\n- Suggests concrete improvements"
+                prompt += "\n- Relates feedback to course materials and examples"
+                prompt += "\n- Maintains a constructive and encouraging tone"
+            else:
+                prompt += f"\n\nStudent question about their work: {student_query}"
+                prompt += "\n\nProvide a response that:"
+                prompt += "\n- Addresses the specific question"
+                prompt += "\n- References relevant course materials"
+                prompt += "\n- Provides constructive feedback"
+                prompt += "\n- Encourages critical thinking"
+        else:
+            prompt += f"\n\nStudent query: {student_query}"
+            prompt += "\n\nProvide a helpful tutoring response that:"
+            prompt += "\n- Addresses the student's specific question"
+            prompt += "\n- References relevant course materials"
+            prompt += "\n- Encourages critical thinking"
+        
+        response = self.llm.generate_content(prompt)
+        return response.text
+        
+    except Exception as e:
+        error_msg = f"Error generating response: {str(e)}"
+        print(error_msg)
+        return "I apologize, but I encountered an error generating the response. Please try again or rephrase your question."
+    
 if __name__ == "__main__":
     create_tutor_ui()

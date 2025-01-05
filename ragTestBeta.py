@@ -158,7 +158,7 @@ class RAGTutor:
         self.processor = DocumentProcessor()
         
         # Configure Gemini API
-        api_key = os.getenv('GOOGLE_API_KEY')
+        api_key = st.secrets["GOOGLE_API_KEY"]
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment variables")
         configure(api_key=api_key)

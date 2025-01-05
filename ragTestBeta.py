@@ -223,7 +223,7 @@ class RAGTutor:
             raise FileNotFoundError(f"Course folder not found: {COURSE_FOLDER}")
         
         # Process lecture notes
-        self._process_folder(course_folder / "Lecture Notes", "lecture")
+        self._process_folder(course_folder / "Lecture notes", "lecture")
         
         # Process tutorial sheets
         self._process_folder(course_folder / "Tutorial sheets", "tutorial")

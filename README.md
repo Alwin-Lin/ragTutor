@@ -13,7 +13,8 @@ RAG Tutor is an AI-powered tutoring system designed specifically for the "Societ
 
 ## Prerequisites
 - Python 3.8+
-- Google API Key for Gemini Pro
+- Gemini API Key
+   - [How to get a Gemini API key?](https://ai.google.dev/gemini-api/docs?gad_source=1&gclid=Cj0KCQiAvvO7BhC-ARIsAGFyToWGI4cqFsQsnqj9i3OzoB1JXuv76beex2eRxKUONigeEKsicCEM944aAktYEALw_wcB)
 - Course materials organized in the specified folder structure
 
 ## Installation

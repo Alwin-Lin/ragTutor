@@ -35,85 +35,109 @@ class ProcessedDocument:
     assignment_number: str = None
 
 class DocumentProcessor:
-    def __init__(self):
-        self.error_logs = []
-        
-    def read_pdf(self, file_path: str) -> str:
-        """Extract text from PDF files with error recovery"""
-        text = ""
+    def read_pdf(self, file_path: str) -> List[Dict[str, any]]:
+        """Extract text from PDF files with page tracking"""
+        pages = []
         try:
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
-                for page_num, page in enumerate(pdf_reader.pages):
+                for page_num, page in enumerate(pdf_reader.pages, 1):
                     try:
-                        text += page.extract_text() + "\n"
+                        text = page.extract_text()
+                        if text.strip():
+                            pages.append({
+                                'content': text,
+                                'page_number': page_num
+                            })
                     except Exception as e:
                         self.error_logs.append(f"Error in {file_path}, page {page_num}: {str(e)}")
                         continue
         except Exception as e:
             self.error_logs.append(f"Error processing {file_path}: {str(e)}")
-        return text
+        return pages
 
-    def read_docx(self, file_path: str) -> str:
-        """Extract text from DOCX files with error recovery"""
-        try:
-            doc = Document(file_path)
-            return "\n".join([paragraph.text for paragraph in doc.paragraphs])
-        except Exception as e:
-            self.error_logs.append(f"Error processing {file_path}: {str(e)}")
-            return ""
-
-    def read_pptx(self, file_path: str) -> str:
-        """Extract text from PowerPoint files with error recovery"""
+    def read_pptx(self, file_path: str) -> List[Dict[str, any]]:
+        """Extract text from PowerPoint files with slide tracking"""
+        slides = []
         try:
             prs = Presentation(file_path)
-            text = []
-            
-            for slide in prs.slides:
+            for slide_num, slide in enumerate(prs.slides, 1):
                 slide_text = []
                 for shape in slide.shapes:
                     if hasattr(shape, "text"):
                         slide_text.append(shape.text)
-                text.append("\n".join(slide_text))
-            
-            return "\n===SLIDE BREAK===\n".join(text)
+                if slide_text:
+                    slides.append({
+                        'content': "\n".join(slide_text),
+                        'slide_number': slide_num
+                    })
         except Exception as e:
             self.error_logs.append(f"Error processing {file_path}: {str(e)}")
-            return ""
+        return slides
 
-    @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1000) -> List[str]:
-        """Split text into smaller chunks while preserving slide breaks"""
-        if not text:
+    def read_docx(self, file_path: str) -> List[Dict[str, any]]:
+        """Extract text from DOCX files with paragraph tracking"""
+        sections = []
+        try:
+            doc = Document(file_path)
+            current_section = []
+            section_count = 1
+            
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    current_section.append(para.text)
+                    if len("\n".join(current_section)) >= 1000:
+                        sections.append({
+                            'content': "\n".join(current_section),
+                            'section': section_count
+                        })
+                        current_section = []
+                        section_count += 1
+            
+            if current_section:
+                sections.append({
+                    'content': "\n".join(current_section),
+                    'section': section_count
+                })
+        except Exception as e:
+            self.error_logs.append(f"Error processing {file_path}: {str(e)}")
+        return sections
+
+    def chunk_text(self, content: Dict[str, any], chunk_size: int = 1000) -> List[Dict[str, any]]:
+        """Split text into smaller chunks while preserving source information"""
+        if not content['content']:
             return []
             
         chunks = []
-        slides = text.split("===SLIDE BREAK===")
+        words = content['content'].split()
+        current_chunk = []
+        current_size = 0
         
-        for slide in slides:
-            words = slide.split()
-            current_chunk = []
-            current_size = 0
-            
-            for word in words:
-                if current_size + len(word) > chunk_size:
-                    if current_chunk:  # Only append if there's content
-                        chunks.append(" ".join(current_chunk))
-                    current_chunk = [word]
-                    current_size = len(word)
-                else:
-                    current_chunk.append(word)
-                    current_size += len(word) + 1
-            
-            if current_chunk:  # Only append if there's content
-                chunks.append(" ".join(current_chunk))
+        for word in words:
+            if current_size + len(word) > chunk_size:
+                if current_chunk:
+                    chunks.append({
+                        'content': " ".join(current_chunk),
+                        **{k: v for k, v in content.items() if k != 'content'}
+                    })
+                current_chunk = [word]
+                current_size = len(word)
+            else:
+                current_chunk.append(word)
+                current_size += len(word) + 1
         
-        return [chunk for chunk in chunks if chunk.strip()]  # Remove empty chunks
+        if current_chunk:
+            chunks.append({
+                'content': " ".join(current_chunk),
+                **{k: v for k, v in content.items() if k != 'content'}
+            })
+        
+        return chunks
 
 class VectorStore:
     def __init__(self, base_path: str):
         self.base_path = Path(base_path)
-        self.base_path.mkdir(exist_ok=True, parents=True)  # Added parents=True
+        self.base_path.mkdir(exist_ok=True, parents=True)
         
     def save_data(self, 
                   embeddings: Dict,
@@ -152,14 +176,14 @@ class VectorStore:
             return {}, {}, {}, ""
 
 class RAGTutor:
-    def __init__(self):
+    def __init__(self, api_key: str):
         # Initialize vector store
         self.vector_store = VectorStore(VECTOR_DB_PATH)
         self.processor = DocumentProcessor()
         
-        api_key = st.secrets["GOOGLE_API_KEY"]
+        # Configure Gemini API with provided key
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+            raise ValueError("Google API Key is required")
         configure(api_key=api_key)
         
         # Initialize models
@@ -270,29 +294,49 @@ class RAGTutor:
             self._process_single_file(file_path, category)                
     
     def _process_single_file(self, file_path: Path, doc_type: str,
-                           quality_label: str = None,
-                           assignment_number: str = None):
-        """Process a single file with error handling"""
+                        quality_label: str = None,
+                        assignment_number: str = None):
+        """Process a single file with source tracking"""
         try:
-            content = None
+            content_sections = []
             if file_path.suffix.lower() == '.pdf':
-                content = self.processor.read_pdf(str(file_path))
+                content_sections = self.processor.read_pdf(str(file_path))
+                print(file_path.suffix.lower())
             elif file_path.suffix.lower() == '.docx':
-                content = self.processor.read_docx(str(file_path))
+                content_sections = self.processor.read_docx(str(file_path))
+                print(file_path.suffix.lower())
             elif file_path.suffix.lower() in ['.pptx', '.ppt']:
-                content = self.processor.read_pptx(str(file_path))
+                content_sections = self.processor.read_pptx(str(file_path))
+                print(file_path.suffix.lower())
             
-            if content and content.strip():  # Only process if we have content
-                chunks = self.processor.chunk_text(content)
-                if chunks:  # Only add if we have valid chunks
-                    doc_id = self._generate_doc_id(file_path, doc_type, 
-                                                assignment_number, quality_label)
-                    self._add_to_index(doc_id, chunks, file_path, doc_type,
-                                    quality_label, assignment_number)
-            
+            if content_sections:
+                doc_id = self._generate_doc_id(file_path, doc_type, 
+                                            assignment_number, quality_label)
+                
+                all_chunks = []
+                for section in content_sections:
+                    # Ensure section is a dictionary
+                    if isinstance(section, str):
+                        section = {'content': section}
+                    
+                    # Add metadata to section
+                    section['file_name'] = file_path.name
+                    section['doc_type'] = doc_type
+                    section['quality_label'] = quality_label
+                    section['assignment_number'] = assignment_number
+                    
+                    chunks = self.processor.chunk_text(section)
+                    all_chunks.extend(chunks)
+                
+                if all_chunks:
+                    self._add_to_index(doc_id, all_chunks)
+        
         except Exception as e:
             self.processor.error_logs.append(f"Error processing {file_path}: {str(e)}")
+            print(f"Error details: {str(e)}")
     
+    #ToDo: What does this do, why is it here?
+    ### doc_id is for preventing simular document name and for labeling the quality of student works
     def _generate_doc_id(self, file_path: Path, doc_type: str,
                         assignment_number: str = None,
                         quality_label: str = None) -> str:
@@ -302,146 +346,231 @@ class RAGTutor:
             doc_id = f"{assignment_number}_{doc_id}"
         if quality_label:
             doc_id = f"{doc_id}_{quality_label}"
+        print(doc_id)
         return doc_id
     
-    def _add_to_index(self, doc_id: str, chunks: List[str], 
-                     file_path: Path, doc_type: str,
-                     quality_label: str = None,
-                     assignment_number: str = None):
-        """Add document to searchable index"""
+    def _add_to_index(self, doc_id: str, chunks: List[Dict[str, any]]):
+        """Add document to searchable index with source information"""
         try:
-            embeddings = self.embed_model.encode(chunks)
+            # Extract just the text content for embedding
+            texts = [chunk['content'] if isinstance(chunk, dict) else chunk for chunk in chunks]
+            embeddings = self.embed_model.encode(texts)
             
             self.document_embeddings[doc_id] = embeddings
             self.document_contents[doc_id] = chunks
+            
+            # Store simplified metadata
             self.document_metadata[doc_id] = {
-                'path': str(file_path),
-                'type': doc_type,
-                'quality_label': quality_label,
-                'assignment_number': assignment_number
+                'type': doc_id.split('_')[0],  # Extract type from doc_id
+                'quality_label': None,
+                'assignment_number': None
             }
+            
+            # Add additional metadata if available
+            if '_Assignment' in doc_id:
+                assignment_part = doc_id.split('_Assignment')[1]
+                assignment_number = 'Assignment' + assignment_part[0]  # Get the number
+                self.document_metadata[doc_id]['assignment_number'] = assignment_number
+                
+            # Add quality label if present
+            if any(label in doc_id.lower() for label in ['good', 'average', 'poor']):
+                for label in ['good', 'average', 'poor']:
+                    if label in doc_id.lower():
+                        self.document_metadata[doc_id]['quality_label'] = label
+                        break
+                        
         except Exception as e:
             self.processor.error_logs.append(f"Error embedding {doc_id}: {str(e)}")
     
-    def retrieve_relevant_context(self, 
-                                query: str, 
-                                top_k: int = 3,
-                                include_examples: bool = True) -> List[str]:
-        """Retrieve most relevant content for a given query"""
+    def retrieve_relevant_context(self, query: str, top_k: int = 3) -> List[Dict[str, any]]:
+        """Retrieve most relevant content with explicit source information"""
         query_embedding = self.embed_model.encode(query)
         
         all_similarities = []
         for doc_id, embeddings in self.document_embeddings.items():
-            # Skip student examples if not requested
-            if not include_examples and self.document_metadata[doc_id]['type'] == 'student_example':
-                continue
-                
             similarities = cosine_similarity([query_embedding], embeddings)[0]
             for idx, sim in enumerate(similarities):
                 all_similarities.append((sim, doc_id, idx))
         
-        # Sort by similarity and get top_k
         all_similarities.sort(reverse=True)
         relevant_content = []
         
         for sim, doc_id, idx in all_similarities[:top_k]:
-            content = self.document_contents[doc_id][idx]
+            chunk = self.document_contents[doc_id][idx]
             metadata = self.document_metadata[doc_id]
-            source = f"\nSource: {metadata['type']}"
-            if metadata['assignment_number']:
-                source += f" ({metadata['assignment_number']})"
-            if metadata['quality_label']:
-                source += f" - {metadata['quality_label']} example"
-            relevant_content.append(content + source)
             
+            # Create detailed source information
+            source_info = {
+                'content': chunk['content'] if isinstance(chunk, dict) else chunk,
+                'similarity_score': float(sim),
+                'document_type': metadata['type'],
+                'file_path': chunk.get('file_name', 'Unknown'),
+                'location': {}
+            }
+            
+            # Add specific location information based on document type
+            if isinstance(chunk, dict):
+                if 'page_number' in chunk:
+                    source_info['location']['page'] = chunk['page_number']
+                if 'slide_number' in chunk:
+                    source_info['location']['slide'] = chunk['slide_number']
+                if 'section' in chunk:
+                    source_info['location']['section'] = chunk['section']
+            
+            # Add quality and assignment information if available
+            if metadata.get('quality_label'):
+                source_info['quality_label'] = metadata['quality_label']
+            if metadata.get('assignment_number'):
+                source_info['assignment_number'] = metadata['assignment_number']
+            
+            relevant_content.append(source_info)
+        print(relevant_content)
         return relevant_content
     
+    def format_source_citation(self, source_info: Dict) -> str:
+        """Format source information into a readable citation"""
+        citation = f"\n\nSource: {source_info['file_path']}"
+        
+        # Add location information
+        if source_info['location']:
+            locations = []
+            if 'page' in source_info['location']:
+                locations.append(f"Page {source_info['location']['page']}")
+            if 'slide' in source_info['location']:
+                locations.append(f"Slide {source_info['location']['slide']}")
+            if 'section' in source_info['location']:
+                locations.append(f"Section {source_info['location']['section']}")
+            if locations:
+                citation += f" ({', '.join(locations)})"
+        
+        # Add quality and assignment information for student examples
+        if source_info.get('quality_label') and source_info.get('assignment_number'):
+            citation += f"\nStudent Example - {source_info['assignment_number']}"
+            citation += f"\nQuality Level: {source_info['quality_label'].title()}"
+        
+        return citation
+    
     def generate_response(self, 
-                        student_query: str,
-                        student_work: str = None,
-                        assignment_context: str = None) -> str:
-        """Generate tutoring response with error handling"""
+                         student_query: str,
+                         student_work: str = None) -> Dict[str, any]:
+        """Generate tutoring response with explicit source materials"""
         try:
-            # Adjust context retrieval based on whether we're providing feedback
-            if student_work and student_query == "Please provide feedback on this work and suggest improvements.":
-                # For feedback-only requests, prioritize similar examples and rubric
-                context = self.retrieve_relevant_context(student_work, top_k=4, include_examples=True)
-            else:
-                context = self.retrieve_relevant_context(student_query)
+            # Retrieve relevant context
+            contexts = self.retrieve_relevant_context(
+                student_work if student_work else student_query
+            )
             
-            prompt = f"""You are an AI tutor for the course 'Society and the Engineer'.
+            # Prepare formatted context with citations
+            formatted_contexts = []
+            for ctx in contexts:
+                formatted_context = {
+                    'content': ctx['content'],
+                    'citation': self.format_source_citation(ctx),
+                    'relevance': ctx['similarity_score']
+                }
+                formatted_contexts.append(formatted_context)
             
-    Context from course materials:
-    {' '.join(context)}"""
-
-            if assignment_context and assignment_context != "None":
-                prompt += f"\n\nCurrent assignment: {assignment_context}"
-
+            # Create prompt with explicit source references
+            prompt_parts = ["You are an AI tutor for the course 'Society and the Engineer'.\n"]
+            prompt_parts.append("\nRelevant course materials:")
+            
+            for i, ctx in enumerate(formatted_contexts, 1):
+                prompt_parts.append(f"\n[Reference {i}]:")
+                prompt_parts.append(ctx['content'])
+                prompt_parts.append(ctx['citation'])
+            
             if student_work:
-                prompt += f"\n\nStudent work submitted: {student_work}"
+                prompt_parts.append(f"\n\nStudent work submitted: {student_work}")
                 
                 if student_query == "Please provide feedback on this work and suggest improvements.":
-                    prompt += "\n\nProvide detailed feedback on the submitted work that:"
-                    prompt += "\n- Analyzes the work's strengths and areas for improvement"
-                    prompt += "\n- References specific parts of the submission"
-                    prompt += "\n- Suggests concrete improvements"
-                    prompt += "\n- Relates feedback to course materials and examples"
-                    prompt += "\n- Maintains a constructive and encouraging tone"
+                    prompt_parts.append("\n\nProvide detailed feedback that:")
+                    prompt_parts.append("\n- Rates the work as poor/average/strong")
+                    prompt_parts.append("\n- Analyzes strengths and areas for improvement")
+                    prompt_parts.append("\n- References specific parts of the submission")
+                    prompt_parts.append("\n- Suggests concrete improvements")
+                    prompt_parts.append("\n- References specific course materials using [Reference X] format")
                 else:
-                    prompt += f"\n\nStudent question about their work: {student_query}"
-                    prompt += "\n\nProvide a response that:"
-                    prompt += "\n- Addresses the specific question"
-                    prompt += "\n- References relevant course materials"
-                    prompt += "\n- Provides constructive feedback"
-                    prompt += "\n- Encourages critical thinking"
+                    prompt_parts.append(f"\n\nStudent question: {student_query}")
             else:
-                prompt += f"\n\nStudent query: {student_query}"
-                prompt += "\n\nProvide a helpful tutoring response that:"
-                prompt += "\n- Addresses the student's specific question"
-                prompt += "\n- References relevant course materials"
-                prompt += "\n- Encourages critical thinking"
+                prompt_parts.append(f"\n\nStudent query: {student_query}")
             
-            response = self.llm.generate_content(prompt)
-            return response.text
+            prompt_parts.append("\n\nIn your response:")
+            prompt_parts.append("\n- Directly answer the question")
+            prompt_parts.append("\n- Use [Reference X] to cite specific source materials")
+            prompt_parts.append("\n- Connect ideas across different references")
+            prompt_parts.append("\n- Provide specific examples when possible")
+            
+            # Generate response
+            response = self.llm.generate_content("".join(prompt_parts))
+            response_text = ""
+            if hasattr(response, 'parts'):
+                for part in response.parts:
+                    response_text += part.text
+            else:
+                response_text = getattr(response, 'text', 'Unable to generate response')
+            
+            # Return both response and source materials
+            return {
+                'response': response_text,
+                'sources': formatted_contexts
+            }
             
         except Exception as e:
-            error_msg = f"Error generating response: {str(e)}"
-            print(error_msg)
-            return "I apologize, but I encountered an error generating the response. Please try again or rephrase your question."
-        
+            print(f"Error generating response: {str(e)}")
+            return {
+                'response': "I apologize, but I encountered an error generating the response. Please try again.",
+                'sources': []
+            }
+
 def create_tutor_ui():
     st.set_page_config(layout="wide", page_title="ENG3004 AI Tutor")
     st.title("Society and the Engineer - AI Tutor")
     
-    if 'tutor' not in st.session_state:
+    # Add API key input at the top
+    api_key = st.text_input(
+        "Enter your Google API Key", 
+        type="password",
+        help="Get your API key from https://makersuite.google.com/app/apikey"
+    )
+    
+    if not api_key:
+        st.warning("Please enter your Google API Key to use the tutor.")
+        st.markdown("""
+        To get an API key:
+        1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+        2. Sign in or create an account
+        3. Click 'Create API Key'
+        4. Copy and paste your key above
+        
+        Your API key will only be used for this session and won't be stored.
+        """)
+        return
+    
+    # Initialize tutor with API key if not already initialized or if key changed
+    if 'tutor' not in st.session_state or 'api_key' not in st.session_state or st.session_state.api_key != api_key:
         with st.spinner("Initializing tutor..."):
             try:
-                st.session_state.tutor = RAGTutor()
+                st.session_state.tutor = RAGTutor(api_key)
+                st.session_state.api_key = api_key
                 st.success("Tutor initialized successfully!")
             except Exception as e:
                 st.error(f"Error initializing tutor: {str(e)}")
                 return
     
-    # Assignment context selector
-    assignment_options = ["None"] + [
-        f"Assignment {i}" for i in range(1, 3) 
-        if (Path(COURSE_FOLDER) / f"Assignment{i}").exists()
-    ]
-    assignment_context = st.selectbox(
-        "Select assignment context (if applicable):",
-        assignment_options
-    )
-    
     # Input areas
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        student_query = st.text_area("What's your question? (Optional if submitting work for feedback)", 
-                                   height=150)
+        student_query = st.text_area(
+            "What's your question? (Optional if submitting work for feedback)", 
+            height=150
+        )
     
     with col2:
-        student_work = st.text_area("Paste your work here for feedback (Optional)", 
-                                   height=150)
+        student_work = st.text_area(
+            "Paste your work here for feedback (Optional)", 
+            height=150
+        )
     
     if st.button("Get Help"):
         if not student_query and not student_work:
@@ -449,74 +578,33 @@ def create_tutor_ui():
             return
             
         with st.spinner("Generating response..."):
-            if not student_query and student_work:
-                # If only work is submitted, generate a general feedback question
-                default_query = "Please provide feedback on this work and suggest improvements."
-                response = st.session_state.tutor.generate_response(
-                    default_query,
-                    student_work,
-                    assignment_context
-                )
-            else:
-                response = st.session_state.tutor.generate_response(
-                    student_query,
-                    student_work if student_work else None,
-                    assignment_context
-                )
-            st.write(response)
+            try:
+                if not student_query and student_work:
+                    default_query = "Please provide feedback on this work and suggest improvements."
+                    result = st.session_state.tutor.generate_response(
+                        default_query,
+                        student_work
+                    )
+                else:
+                    result = st.session_state.tutor.generate_response(
+                        student_query,
+                        student_work if student_work else None
+                    )
+                
+                # Display main response
+                st.write("### Response")
+                st.write(result['response'])
+                
+                # Display source materials
+                st.write("### Source Materials")
+                for i, source in enumerate(result['sources'], 1):
+                    with st.expander(f"Reference {i}"):
+                        st.write(source['content'])
+                        st.write(source['citation'])
+                        st.write(f"Relevance Score: {source['relevance']:.2f}")
+            except Exception as e:
+                st.error(f"Error generating response: {str(e)}")
+                st.warning("Please check if your API key is valid and has sufficient quota.")
 
-def generate_response(self, 
-                     student_query: str,
-                     student_work: str = None,
-                     assignment_context: str = None) -> str:
-    """Generate tutoring response with error handling"""
-    try:
-        # Adjust context retrieval based on whether we're providing feedback
-        if student_work and student_query == "Please provide feedback on this work and suggest improvements.":
-            # For feedback-only requests, prioritize similar examples and rubric
-            context = self.retrieve_relevant_context(student_work, top_k=4, include_examples=True)
-        else:
-            context = self.retrieve_relevant_context(student_query)
-        
-        prompt = f"""You are an AI tutor for the course 'Society and the Engineer'.
-        
-Context from course materials:
-{' '.join(context)}"""
-
-        if assignment_context and assignment_context != "None":
-            prompt += f"\n\nCurrent assignment: {assignment_context}"
-
-        if student_work:
-            prompt += f"\n\nStudent work submitted: {student_work}"
-            
-            if student_query == "Please provide feedback on this work and suggest improvements.":
-                prompt += "\n\nProvide detailed feedback on the submitted work that:"
-                prompt += "\n- Analyzes the work's strengths and areas for improvement"
-                prompt += "\n- References specific parts of the submission"
-                prompt += "\n- Suggests concrete improvements"
-                prompt += "\n- Relates feedback to course materials and examples"
-                prompt += "\n- Maintains a constructive and encouraging tone"
-            else:
-                prompt += f"\n\nStudent question about their work: {student_query}"
-                prompt += "\n\nProvide a response that:"
-                prompt += "\n- Addresses the specific question"
-                prompt += "\n- References relevant course materials"
-                prompt += "\n- Provides constructive feedback"
-                prompt += "\n- Encourages critical thinking"
-        else:
-            prompt += f"\n\nStudent query: {student_query}"
-            prompt += "\n\nProvide a helpful tutoring response that:"
-            prompt += "\n- Addresses the student's specific question"
-            prompt += "\n- References relevant course materials"
-            prompt += "\n- Encourages critical thinking"
-        
-        response = self.llm.generate_content(prompt)
-        return response.text
-        
-    except Exception as e:
-        error_msg = f"Error generating response: {str(e)}"
-        print(error_msg)
-        return "I apologize, but I encountered an error generating the response. Please try again or rephrase your question."
-    
 if __name__ == "__main__":
     create_tutor_ui()
